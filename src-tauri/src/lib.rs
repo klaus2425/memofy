@@ -1,6 +1,7 @@
 mod commands;
 mod sidecar;
 
+use sidecar::SidecarManager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,6 +25,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(SidecarManager::new())
+        .invoke_handler(tauri::generate_handler![
+            sidecar::send_to_sidecar,
+            sidecar::check_ollama_status,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
