@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { getDb } from "../lib/db";
 import type { Job } from "../lib/types";
 
@@ -99,6 +100,16 @@ export function useJobs() {
           setStreamingSummary(msg.full_text || "");
           if (msg.job_id) {
             saveSummary(parseInt(msg.job_id), msg.full_text || "");
+            (async () => {
+              let granted = await isPermissionGranted();
+              if (!granted) {
+                const permission = await requestPermission();
+                granted = permission === "granted";
+              }
+              if (granted) {
+                sendNotification({ title: "Memofy", body: "Your meeting notes are ready!" });
+              }
+            })();
           }
           break;
 
