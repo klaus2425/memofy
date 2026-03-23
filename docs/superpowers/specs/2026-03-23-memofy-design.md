@@ -57,6 +57,44 @@ The Python sidecar is a minimal worker that receives commands, runs Whisper, cal
 6. Rust saves the final transcript and summary to SQLite and emits a completion event.
 7. React updates the UI. The note lands in the user's library.
 
+### Sidecar Protocol
+
+Communication between Rust and the Python sidecar uses newline-delimited JSON over stdin/stdout. Each message has a `type` field.
+
+**Rust → Sidecar (stdin):**
+
+```json
+{"type": "transcribe", "audio_path": "/path/to/audio.wav", "model": "base", "job_id": "abc123"}
+{"type": "summarize", "transcript": "...", "prompt_style": "standard", "job_id": "abc123"}
+{"type": "health_check"}
+```
+
+**Sidecar → Rust (stdout):**
+
+```json
+{"type": "transcript_chunk", "text": "And then we discussed...", "progress": 0.45, "job_id": "abc123"}
+{"type": "transcript_complete", "full_text": "...", "job_id": "abc123"}
+{"type": "summary_chunk", "text": "The team ", "job_id": "abc123"}
+{"type": "summary_complete", "full_text": "...", "job_id": "abc123"}
+{"type": "error", "message": "Whisper model not found", "job_id": "abc123"}
+{"type": "health", "status": "ok", "whisper_ready": true}
+```
+
+Streaming messages (`transcript_chunk`, `summary_chunk`) are emitted as processing progresses. The `progress` field on transcript chunks is a 0–1 float representing audio duration processed vs. total.
+
+### Data Model
+
+SQLite schema (managed via Tauri SQL plugin with versioned migrations):
+
+- **notes** — id, title, created_at, updated_at, duration_seconds, source_type (upload/record/paste), folder_id (nullable FK), is_favorite, transcript, summary, audio_path (nullable), status (pending/transcribing/summarizing/complete/failed)
+- **folders** — id, name, created_at, sort_order
+- **tags** — id, name
+- **note_tags** — note_id (FK), tag_id (FK) — many-to-many join
+- **jobs** — id, note_id (FK), status, started_at, completed_at, error_message (nullable), progress (0–1 float)
+- **settings** — key, value (JSON string)
+
+Full-text search uses SQLite FTS5 virtual table indexing title, transcript, and summary columns. Search is token-based (not substring). FTS index is updated on note insert/update.
+
 ### Technology Stack
 
 - **Framework:** Tauri (lightweight, uses system webview)
@@ -64,7 +102,7 @@ The Python sidecar is a minimal worker that receives commands, runs Whisper, cal
 - **Backend:** Rust (Tauri core) + Python sidecar
 - **Transcription:** OpenAI Whisper (local)
 - **Summarization:** Ollama (local LLM, user-installed)
-- **Database:** SQLite via Tauri plugin
+- **Database:** SQLite via Tauri plugin (with FTS5 for search)
 - **Audio processing:** FFmpeg (bundled)
 - **Default LLM models:** llama3 or mistral (user-selectable)
 
@@ -82,7 +120,14 @@ App pings `localhost:11434`. Three possible states:
 - **Not installed:** Friendly explanation of what Ollama is with a download link. Option to proceed without it (transcription still works, summarization unavailable).
 
 **Step 3 — Whisper Model Selection:**
-Plain-language labels explaining tradeoffs: "Fast (tiny)" through "Best (large)". Default to "Balanced (base)". Download happens inline with a progress bar.
+Plain-language labels explaining tradeoffs with download sizes shown:
+- "Fast (tiny)" — ~75 MB
+- "Balanced (base)" — ~150 MB (default)
+- "Accurate (small)" — ~500 MB
+- "High Quality (medium)" — ~1.5 GB
+- "Best (large)" — ~3 GB
+
+Download happens inline with a progress bar. For models over 1 GB, show a confirmation: "This will download X GB. Continue?"
 
 ### Post-Setup
 - Drop user into empty library with a prominent "New Note" button and quick-start hint.
@@ -105,12 +150,12 @@ All three modes ship in v1.
 ### Record System Audio
 - "Record" button captures system audio output (e.g., Zoom/Teams calls).
 - Platform-specific implementation:
-  - **Windows:** WASAPI loopback capture
-  - **macOS:** Virtual audio device (e.g., BlackHole) with guided one-time setup wizard
+  - **Windows:** WASAPI loopback capture (well-supported, no extra drivers)
+  - **macOS:** Deferred to post-v1. macOS system audio capture requires a virtual audio driver (e.g., BlackHole), which involves installing a kernel extension — too high a barrier for general users. v1 on macOS offers microphone recording as a fallback, with a note that system audio capture is coming.
   - **Linux:** PulseAudio/PipeWire monitor source
 - Live waveform visualization during recording.
 - Pause/resume and stop controls.
-- Audio saved as WAV to temp directory, then processed like an upload.
+- Audio saved as WAV to the app's data directory (not temp), then processed like an upload.
 
 ### Paste Transcript
 - Simple text area for pasting from Zoom, Otter.ai, Google Meet, or any raw text.
@@ -133,11 +178,11 @@ Users can scroll through the live transcript while summarization happens. Cancel
 
 ### Background Processing
 
-- Jobs stored in SQLite with status tracking: pending → transcribing → summarizing → complete → failed.
-- Sidecar processes one job at a time.
-- Small indicator in the header showing active jobs: "Processing 2 notes..."
+- Jobs stored in SQLite with status tracking: pending → transcribing → summarizing → complete/failed.
+- Sidecar processes one job at a time. Additional jobs remain queued (pending).
+- Small indicator in the header: "Processing 1 note (1 queued)..." reflecting active + waiting jobs.
 - Desktop notification on completion (Tauri notification API).
-- If the app is closed mid-processing, the job resumes on next launch.
+- **Interrupted jobs:** If the app is closed mid-processing, the job status is preserved in SQLite. On next launch, interrupted transcription jobs restart from the beginning (Whisper does not support checkpointing). Interrupted summarization jobs re-send the saved transcript to Ollama. Audio files are stored in the app's data directory (not temp) to survive restarts.
 
 ### Error Handling
 
@@ -149,15 +194,38 @@ Users can scroll through the live transcript while summarization happens. Cancel
 
 ### Narrative Format
 
-Rather than rigid sections, Ollama produces a flowing conversational summary. The system prompt instructs the model to write naturally while weaving in:
+Rather than rigid sections, Ollama produces a flowing conversational summary. The tone is like a thoughtful colleague summarizing the meeting for someone who missed it — readable, concise, not robotic.
 
-- What the meeting was about and the key context
-- Important decisions that were made and why
-- Action items and who owns them (if mentioned)
-- Notable discussion points or disagreements
-- What was left unresolved
+**System prompt template:**
 
-The tone is like a thoughtful colleague summarizing the meeting for someone who missed it — readable, concise, not robotic.
+```
+You are a meeting note assistant. Read the following transcript and write a natural,
+flowing summary as if you were a thoughtful colleague explaining what happened to someone
+who missed the meeting.
+
+Weave in key decisions, action items (with owners if mentioned), notable discussion points,
+and anything left unresolved. Do not use rigid section headers or bullet lists — write in
+clear, connected prose paragraphs.
+
+Length: {length_preference}
+
+Transcript:
+{transcript}
+```
+
+The `{length_preference}` placeholder maps to the user's setting:
+- **Brief:** "Keep it to 2-3 short paragraphs, focusing only on the most important points."
+- **Standard:** "Aim for a thorough but concise summary, typically 3-5 paragraphs."
+- **Detailed:** "Be comprehensive. Cover all significant discussion points, decisions, and context."
+
+### Transcript Cleaning
+
+The "cleaned transcript" shown in the Transcript tab is the raw Whisper output with light post-processing applied by the Python sidecar:
+- Punctuation and capitalization correction
+- Filler word removal ("um", "uh", "like", "you know")
+- Paragraph breaks inserted at natural pauses (>2 seconds)
+
+Speaker diarization is not included in v1 (Whisper does not natively support it). Timestamps are preserved from Whisper's segment output.
 
 ### Note View Layout
 
