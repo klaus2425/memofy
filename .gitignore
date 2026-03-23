@@ -20,6 +20,9 @@ Thumbs.db
 # Superpowers artifacts
 .superpowers/
 
+# Git worktrees
+.worktrees/
+
 # Python
 __pycache__/
 *.pyc
