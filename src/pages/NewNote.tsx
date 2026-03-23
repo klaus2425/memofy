@@ -1,12 +1,133 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNotes } from "../hooks/useNotes";
 import { useJobs } from "../hooks/useJobs";
 import { useSettings } from "../hooks/useSettings";
 import { sendToSidecar } from "../lib/commands";
+import { WaveformVisualizer } from "../components/WaveformVisualizer";
 
 type InputMode = "upload" | "record" | "paste";
+
+function RecordMode({ title, onTitleFallback, createNote, createJob, resetStreaming, settings }: {
+  title: string;
+  onTitleFallback: (t: string) => void;
+  createNote: (note: { title: string; source_type: "record"; status: "pending" | "transcribing" | "summarizing" | "complete" | "failed" }) => Promise<number | undefined>;
+  createJob: (noteId: number) => Promise<void>;
+  resetStreaming: () => void;
+  settings: { whisper_model: string };
+}) {
+  const navigate = useNavigate();
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<number | undefined>(undefined);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 2048;
+      source.connect(analyserNode);
+      setAnalyser(analyserNode);
+
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mediaRecorder.start(1000);
+      setIsRecording(true);
+      setDuration(0);
+      timerRef.current = window.setInterval(() => { setDuration((d) => d + 1); }, 1000);
+      onTitleFallback(`Recording \u2014 ${new Date().toLocaleDateString()}`);
+    } catch (err) {
+      alert("Could not access microphone. Please check your permissions.");
+    }
+  };
+
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
+      clearInterval(timerRef.current);
+    }
+  };
+
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current?.state === "paused") {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+      timerRef.current = window.setInterval(() => { setDuration((d) => d + 1); }, 1000);
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!mediaRecorderRef.current) return;
+    return new Promise<void>((resolve) => {
+      mediaRecorderRef.current!.onstop = async () => {
+        clearInterval(timerRef.current);
+        setIsRecording(false);
+        setIsPaused(false);
+
+        const { appDataDir } = await import("@tauri-apps/api/path");
+        const dataDir = await appDataDir();
+        const fileName = `recording-${Date.now()}.wav`;
+        const filePath = `${dataDir}recordings/${fileName}`;
+
+        const noteTitle = title || `Recording \u2014 ${new Date().toLocaleDateString()}`;
+        const noteId = await createNote({ title: noteTitle, source_type: "record", status: "pending" });
+        if (noteId) {
+          await createJob(noteId);
+          resetStreaming();
+          await sendToSidecar({ type: "transcribe", audio_path: filePath, model: settings.whisper_model, job_id: String(noteId) });
+          navigate(`/processing/${noteId}`);
+        }
+        resolve();
+      };
+      mediaRecorderRef.current!.stop();
+      mediaRecorderRef.current!.stream.getTracks().forEach((t) => t.stop());
+    });
+  };
+
+  const formatDuration = (seconds: number) => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, "0");
+    const s = (seconds % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
+
+  return (
+    <div className="max-w-lg">
+      {!isRecording ? (
+        <div className="text-center py-10">
+          <button onClick={startRecording} className="w-20 h-20 rounded-full flex items-center justify-center text-3xl text-white mx-auto mb-4 transition-transform hover:scale-105" style={{ background: "var(--accent)" }}>{"\u{1F3A4}"}</button>
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>Click to start recording</p>
+          <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Currently captures microphone audio</p>
+        </div>
+      ) : (
+        <div>
+          <WaveformVisualizer analyser={analyser} isRecording={isRecording && !isPaused} />
+          <div className="flex items-center justify-center gap-4 mt-4">
+            <span className="text-2xl font-mono font-bold">{formatDuration(duration)}</span>
+            {!isPaused && (<span className="w-3 h-3 rounded-full animate-pulse" style={{ background: "#EF4444" }} />)}
+          </div>
+          <div className="flex items-center justify-center gap-3 mt-4">
+            {isPaused ? (
+              <button onClick={resumeRecording} className="px-5 py-2.5 rounded-xl text-sm font-semibold border" style={{ borderColor: "var(--border)", color: "var(--text)" }}>Resume</button>
+            ) : (
+              <button onClick={pauseRecording} className="px-5 py-2.5 rounded-xl text-sm font-semibold border" style={{ borderColor: "var(--border)", color: "var(--text)" }}>Pause</button>
+            )}
+            <button onClick={stopRecording} className="px-5 py-2.5 rounded-xl text-white text-sm font-semibold" style={{ background: "var(--accent)" }}>Stop & Process</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function NewNote() {
   const navigate = useNavigate();
@@ -84,9 +205,7 @@ export function NewNote() {
         </div>
       )}
       {mode === "record" && (
-        <div className="max-w-lg">
-          <p className="text-sm" style={{ color: "var(--text-muted)" }}>Recording will be implemented in a later task. For now, use Upload or Paste.</p>
-        </div>
+        <RecordMode title={title} onTitleFallback={(t) => { if (!title) setTitle(t); }} createNote={createNote} createJob={createJob} resetStreaming={resetStreaming} settings={settings} />
       )}
       {mode === "paste" && (
         <div className="max-w-lg">
