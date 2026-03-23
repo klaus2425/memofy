@@ -5,7 +5,7 @@ import { checkOllamaStatus, type OllamaStatus } from "../lib/commands";
 
 type Step = "welcome" | "ollama" | "whisper";
 
-export function Onboarding() {
+export function Onboarding({ onComplete }: { onComplete: () => void }) {
   const navigate = useNavigate();
   const { setSetting } = useSettings();
   const [step, setStep] = useState<Step>("welcome");
@@ -30,7 +30,7 @@ export function Onboarding() {
     await setSetting("ollama_model", selectedOllamaModel);
     await setSetting("whisper_model", selectedWhisperModel);
     await setSetting("onboarding_complete", true);
-    navigate("/");
+    onComplete();
   };
 
   const card = (children: React.ReactNode) => (

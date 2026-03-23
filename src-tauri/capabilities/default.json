@@ -13,6 +13,16 @@
     "shell:allow-execute",
     "shell:allow-spawn",
     "shell:allow-stdin-write",
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "python",
+          "cmd": "python",
+          "args": true
+        }
+      ]
+    },
     "notification:default",
     "notification:allow-notify",
     "notification:allow-is-permission-granted",

@@ -21,12 +21,22 @@ impl SidecarManager {
 
         // Spawn sidecar if not running
         if child_lock.is_none() {
-            let sidecar = app
-                .shell()
-                .sidecar("memofy-sidecar")
-                .map_err(|e| format!("Failed to create sidecar command: {e}"))?;
+            // Resolve the sidecar script path relative to the app
+            let sidecar_dir = std::env::current_dir()
+                .map_err(|e| format!("Failed to get current dir: {e}"))?
+                .join("../sidecar/main.py");
+            let sidecar_path = sidecar_dir
+                .canonicalize()
+                .unwrap_or(sidecar_dir)
+                .to_string_lossy()
+                .to_string();
 
-            let (mut rx, child) = sidecar
+            let cmd = app
+                .shell()
+                .command("python")
+                .args([&sidecar_path]);
+
+            let (mut rx, child) = cmd
                 .spawn()
                 .map_err(|e| format!("Failed to spawn sidecar: {e}"))?;
 
@@ -59,7 +69,7 @@ impl SidecarManager {
         }
 
         // Write command to stdin
-        if let Some(ref child) = *child_lock {
+        if let Some(ref mut child) = *child_lock {
             let json_str = serde_json::to_string(&command)
                 .map_err(|e| format!("Failed to serialize command: {e}"))?;
             child

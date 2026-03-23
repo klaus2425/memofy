@@ -37,8 +37,9 @@ pub async fn export_to_markdown(app: AppHandle, data: ExportData) -> Result<Stri
 
     match file_path {
         Some(path) => {
-            fs::write(&path, content).map_err(|e| format!("Failed to write file: {e}"))?;
-            Ok(path.to_string())
+            let path_str = path.to_string();
+            fs::write(&path_str, content).map_err(|e| format!("Failed to write file: {e}"))?;
+            Ok(path_str)
         }
         None => Err("Export cancelled".to_string()),
     }

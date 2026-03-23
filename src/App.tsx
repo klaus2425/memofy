@@ -32,7 +32,7 @@ function App() {
       <Routes>
         {!onboardingComplete && (
           <>
-            <Route path="/onboarding" element={<Onboarding />} />
+            <Route path="/onboarding" element={<Onboarding onComplete={() => setOnboardingComplete(true)} />} />
             <Route path="*" element={<Navigate to="/onboarding" replace />} />
           </>
         )}
