@@ -29,6 +29,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sidecar::send_to_sidecar,
             sidecar::check_ollama_status,
+            commands::export::export_to_markdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
