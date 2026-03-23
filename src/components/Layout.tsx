@@ -8,7 +8,7 @@ import { useTheme } from "../hooks/useTheme";
 export function Layout() {
   const { folders, createFolder } = useFolders();
   const { tags } = useTags();
-  const { activeCount, queuedCount } = useJobs();
+  const { activeCount: _activeCount, queuedCount: _queuedCount } = useJobs();
   useTheme();
 
   const handleCreateFolder = async () => {
